@@ -1,0 +1,223 @@
+import os
+
+# --- CONFIGURATION ---
+# Update this path to match your Tesseract install location.
+# Windows default: r"C:\Program Files\Tesseract-OCR"
+# macOS/Linux: Tesseract is usually already on PATH; set to "" to skip.
+TESSERACT_PATH = r"C:\Program Files\Tesseract-OCR"
+
+if TESSERACT_PATH:
+    os.environ["PATH"] = TESSERACT_PATH + os.pathsep + os.environ["PATH"]
+
+import ocrmypdf
+import fitz  # PyMuPDF
+import csv
+from pathlib import Path
+
+
+def ocr_pdf(input_path, output_path, language="eng", deskew=True):
+    """
+    Run OCR on a scanned PDF using Tesseract via OCRmyPDF.
+
+    Args:
+        input_path: Path to the input PDF.
+        output_path: Path to save the OCR'd PDF.
+        language: OCR language code (default: "eng"). Use "eng+spa" for multiple.
+        deskew: If True, straighten crooked pages before OCR.
+
+    Returns:
+        The OCRmyPDF exit code, or a string describing the error.
+    """
+    try:
+        result = ocrmypdf.ocr(
+            input_path,
+            output_path,
+            language=language,
+            deskew=deskew,
+            skip_text=True,
+            optimize=0
+        )
+        return result
+    except ocrmypdf.exceptions.PriorOcrFoundError:
+        print(f"  Skipped: {input_path} already has OCR text.")
+        return "skipped"
+    except ocrmypdf.exceptions.EncryptedPdfError:
+        print(f"  Error: {input_path} is encrypted.")
+        return "encrypted"
+    except Exception as e:
+        print(f"  Error processing {input_path}: {e}")
+        return "error"
+
+
+def check_failed_pages(pdf_path):
+    """
+    Check which pages in a PDF have no text layer.
+
+    Pages with no text likely had OCR fail or are blank (e.g., backs of
+    double-sided scans).
+
+    Args:
+        pdf_path: Path to the PDF to check.
+
+    Returns:
+        A list of 1-based page numbers with no detected text.
+    """
+    doc = fitz.open(pdf_path)
+    failed = []
+    for i in range(len(doc)):
+        page = doc.load_page(i)
+        text = page.get_text("text").strip()
+        if not text:
+            failed.append(i + 1)
+    doc.close()
+    return failed
+
+
+def process_folder(input_folder, output_folder, report_path, language="eng"):
+    """
+    OCR all PDFs in a folder, check for failed pages, and write a CSV report.
+
+    Args:
+        input_folder: Path to the folder containing scanned PDFs.
+        output_folder: Path to save OCR'd PDFs.
+        report_path: Path to save the OCR results CSV report.
+        language: OCR language code (default: "eng").
+    """
+    input_folder = Path(input_folder)
+    output_folder = Path(output_folder)
+    output_folder.mkdir(parents=True, exist_ok=True)
+
+    pdf_files = sorted(input_folder.glob("*.pdf"))
+    if not pdf_files:
+        print("No PDF files found in the input folder.")
+        return
+
+    report_rows = []
+
+    for pdf_file in pdf_files:
+        print(f"\nProcessing: {pdf_file.name}")
+        output_path = output_folder / pdf_file.name
+
+        # Step 1: Run OCR
+        result = ocr_pdf(pdf_file, output_path, language=language)
+
+        # Step 2: Check for failed pages
+        check_path = output_path if output_path.exists() else pdf_file
+        failed_pages = check_failed_pages(check_path)
+        total_pages = len(fitz.open(check_path))
+
+        # Step 3: Log results
+        status = "OK" if not failed_pages else "REVIEW NEEDED"
+        report_rows.append({
+            "File": pdf_file.name,
+            "Total Pages": total_pages,
+            "Failed Pages Count": len(failed_pages),
+            "Failed Page Numbers": ", ".join(str(p) for p in failed_pages) if failed_pages else "None",
+            "OCR Result": str(result),
+            "Status": status
+        })
+
+        if failed_pages:
+            print(f"  WARNING: {len(failed_pages)} page(s) with no text: {failed_pages}")
+        else:
+            print(f"  All {total_pages} pages have text.")
+
+    # Step 4: Write CSV report
+    with open(report_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=report_rows[0].keys())
+        writer.writeheader()
+        writer.writerows(report_rows)
+
+    print(f"\nOCR report saved to: {report_path}")
+
+
+def search_pdfs(folder, search_term, report_path):
+    """
+    Search all PDFs in a folder for a string and write a CSV report.
+
+    The report includes instance counts per file and the specific page
+    numbers where each match was found.
+
+    Args:
+        folder: Path to the folder containing PDFs to search.
+        search_term: The string to search for (case-insensitive).
+        report_path: Path to save the search results CSV report.
+    """
+    folder = Path(folder)
+    pdf_files = sorted(folder.glob("*.pdf"))
+    if not pdf_files:
+        print("No PDF files found in the folder.")
+        return
+
+    report_rows = []
+    grand_total = 0
+
+    for pdf_file in pdf_files:
+        doc = fitz.open(pdf_file)
+        page_hits = {}
+
+        for page_num in range(len(doc)):
+            page = doc.load_page(page_num)
+            results = page.search_for(search_term)
+            if results:
+                page_hits[page_num + 1] = len(results)
+
+        doc.close()
+
+        file_total = sum(page_hits.values())
+        grand_total += file_total
+
+        if page_hits:
+            page_detail = "; ".join(
+                f"p.{pg} ({ct})" for pg, ct in sorted(page_hits.items())
+            )
+        else:
+            page_detail = "None"
+
+        report_rows.append({
+            "File": pdf_file.name,
+            "Search Term": search_term,
+            "Total Instances": file_total,
+            "Pages with Matches": len(page_hits),
+            "Detail (page and count)": page_detail
+        })
+
+        if file_total > 0:
+            print(f"  {pdf_file.name}: {file_total} instance(s) across {len(page_hits)} page(s)")
+        else:
+            print(f"  {pdf_file.name}: No matches found")
+
+    # Write CSV report
+    with open(report_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=report_rows[0].keys())
+        writer.writeheader()
+        writer.writerows(report_rows)
+
+    print(f"\nSearch complete. {grand_total} total instance(s) found across {len(pdf_files)} file(s).")
+    print(f"Search report saved to: {report_path}")
+
+
+# --- MAIN ---
+if __name__ == "__main__":
+    INPUT_FOLDER = r".\input_folder"
+    OUTPUT_FOLDER = r".\ocr_output"
+    OCR_REPORT = r".\ocr_report.csv"
+    SEARCH_REPORT = r".\search_report.csv"
+
+    print("Select a mode:")
+    print("  1 = Scan + OCR only")
+    print("  2 = Search only (searches the ocr_output folder)")
+    print("  3 = Scan + OCR, then Search")
+    mode = input("Enter 1, 2, or 3: ").strip()
+
+    if mode in ("1", "3"):
+        process_folder(INPUT_FOLDER, OUTPUT_FOLDER, OCR_REPORT, language="eng")
+
+    if mode in ("2", "3"):
+        search_term = input("\nEnter the search term: ").strip()
+        if search_term:
+            search_folder = OUTPUT_FOLDER if Path(OUTPUT_FOLDER).exists() and any(Path(OUTPUT_FOLDER).glob("*.pdf")) else INPUT_FOLDER
+            print(f"\nSearching in: {search_folder}")
+            search_pdfs(search_folder, search_term, SEARCH_REPORT)
+        else:
+            print("No search term entered. Skipping search.")
