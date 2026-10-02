@@ -14,7 +14,7 @@ from .naming import Namer
 
 class SkipReason(Enum):
     UNSUPPORTED = "unsupported file type"
-    TEMPORARY = "temporary or hidden file"
+    HIDDEN_OR_TEMPORARY = "hidden or temporary file"
     UNREADABLE = "could not be read"
 
 
@@ -39,10 +39,21 @@ class RenamePlan:
 
 
 @dataclass(frozen=True)
+class FailedRename:
+    action: RenameAction
+    error: str
+
+
+@dataclass(frozen=True)
 class ApplyResult:
     renamed: tuple[RenameAction, ...] = ()
     conflicts: tuple[RenameAction, ...] = ()  # target appeared after planning
-    failed: tuple[tuple[RenameAction, str], ...] = ()  # OS error message
+    failed: tuple[FailedRename, ...] = ()
+
+
+def _key(path: Path) -> str:
+    """Collision key: case-insensitive so plans are safe on any filesystem."""
+    return path.resolve().as_posix().casefold()
 
 
 def _is_hidden(path: Path, root: Path) -> bool:
@@ -61,10 +72,10 @@ class RenamePipeline:
     def plan(self, root: Path) -> RenamePlan:
         plan = RenamePlan()
         files = sorted(p for p in root.rglob("*") if p.is_file())
-        taken = {p.resolve().as_posix().casefold() for p in files}  # never overwrite; case-insensitive safe
+        taken = {_key(p) for p in files}  # existing names are never overwritten
         for path in files:
             if _is_hidden(path, root):
-                plan.skipped.append(SkippedFile(path, SkipReason.TEMPORARY))
+                plan.skipped.append(SkippedFile(path, SkipReason.HIDDEN_OR_TEMPORARY))
                 continue
             if not self._reader.supports(path):
                 plan.skipped.append(SkippedFile(path, SkipReason.UNSUPPORTED))
@@ -83,20 +94,19 @@ class RenamePipeline:
             wanted = path.with_name(self._namer.stem_for(info) + path.suffix.lower())
             target = self._unique(wanted, path, taken)
             if target != path:
-                taken.discard(path.resolve().as_posix().casefold())
-                taken.add(target.resolve().as_posix().casefold())
+                taken.discard(_key(path))
+                taken.add(_key(target))
                 plan.actions.append(RenameAction(path, target, info.classification.category))
         return plan
 
     @staticmethod
     def _unique(target: Path, source: Path, taken: set[str]) -> Path:
-        key = lambda p: p.resolve().as_posix().casefold()  # noqa: E731
-        if target == source or key(target) == key(source) or key(target) not in taken:
+        if _key(target) == _key(source) or _key(target) not in taken:
             return target
         n = 2
         while True:
             candidate = target.with_name(f"{target.stem}_{n}{target.suffix}")
-            if key(candidate) not in taken:
+            if _key(candidate) not in taken:
                 return candidate
             n += 1
 
@@ -104,14 +114,22 @@ class RenamePipeline:
         """Rename every planned file, recording each success in ``journal`` immediately."""
         renamed, conflicts, failed = [], [], []
         for action in plan.actions:
-            if action.target.exists():
+            if action.target.exists() and not action.target.samefile(action.source):  # samefile: case-only renames
                 conflicts.append(action)
                 continue
             try:
                 action.source.rename(action.target)
             except OSError as exc:
-                failed.append((action, str(exc)))
+                failed.append(FailedRename(action, str(exc)))
                 continue
-            journal.record(action.source, action.target)
+            try:
+                journal.record(action.source, action.target)
+            except OSError as exc:  # never leave a rename the undo log doesn't know about
+                try:
+                    action.target.rename(action.source)
+                    failed.append(FailedRename(action, f"journal write failed, rename rolled back: {exc}"))
+                except OSError as rollback_exc:
+                    failed.append(FailedRename(action, f"journal write failed AND rollback failed (file is now {action.target}): {exc}; {rollback_exc}"))
+                continue
             renamed.append(action)
         return ApplyResult(tuple(renamed), tuple(conflicts), tuple(failed))

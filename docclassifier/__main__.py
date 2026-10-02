@@ -40,14 +40,18 @@ def _rename(args: argparse.Namespace) -> int:
     if not args.apply:
         print(f"Dry run: {len(plan.actions)} rename(s) planned. Re-run with --apply to proceed.")
         return 0
-    journal = RenameJournal(args.log or default_journal_path())
+    log_path = args.log or default_journal_path()
+    if log_path.exists():
+        print(f"Refusing to append to existing journal: {log_path}", file=sys.stderr)
+        return 2
+    journal = RenameJournal(log_path)
     result = pipeline.apply(plan, journal)
     print(f"Renamed {len(result.renamed)} file(s). Undo journal: {journal.path}")
     for a in result.conflicts:
         print(f"CONFLICT (target exists, left unchanged): {a.source}", file=sys.stderr)
-    for a, err in result.failed:
-        print(f"FAILED {a.source}: {err}", file=sys.stderr)
-    return 1 if result.failed else 0
+    for f in result.failed:
+        print(f"FAILED {f.action.source}: {f.error}", file=sys.stderr)
+    return 1 if (result.failed or result.conflicts) else 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -58,7 +62,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Restored {res.restored} file(s).")
             for p in res.not_restored:
                 print(f"NOT RESTORED (missing, or original name taken): {p}", file=sys.stderr)
-            return 0
+            return 1 if res.not_restored else 0
         return _rename(args)
     except (ValueError, JournalError, OSError) as exc:
         print(f"Error: {exc}", file=sys.stderr)

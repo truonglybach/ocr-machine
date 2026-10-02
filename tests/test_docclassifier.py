@@ -98,7 +98,7 @@ def test_hidden_directories_are_skipped(tmp_path):
     (tmp_path / ".git").mkdir()
     make_docx(tmp_path / ".git" / "a.docx", "Invoice", "amount due", "bill to")
     plan = pipeline().plan(tmp_path)
-    assert plan.actions == [] and plan.skipped[0].reason is SkipReason.TEMPORARY
+    assert plan.actions == [] and plan.skipped[0].reason is SkipReason.HIDDEN_OR_TEMPORARY
 
 
 def test_journal_survives_failure_midway(tree, monkeypatch):
@@ -142,3 +142,50 @@ def test_cli_dry_run_apply_undo(tree, capsys):
     assert (tree / "scan001.docx").exists()
     assert main(["rename", str(tree), "--template", "{bad}"]) == 2
     assert main(["undo", str(tree / "missing.jsonl")]) == 2
+
+
+@pytest.mark.parametrize("bad", ["{date:>10}", "{title!r}"])
+def test_format_specs_rejected(bad):
+    with pytest.raises(ValueError):
+        NamingConvention(bad)
+
+
+@pytest.mark.parametrize("fmt", ["%d/%m/%Y", "", "%Y..%m"])
+def test_unsafe_date_format_rejected(fmt):
+    with pytest.raises(ValueError):
+        NamingConvention("{date}_{title}", date_format=fmt)
+
+
+def test_truncated_final_journal_line_is_tolerated(tree):
+    p = pipeline()
+    journal = RenameJournal(tree / "j.jsonl")
+    p.apply(p.plan(tree), journal)
+    with journal.path.open("a") as fh:
+        fh.write('{"from": "/x')  # simulated crash mid-write
+    assert journal.undo().restored == 3
+
+
+def test_corruption_mid_journal_is_an_error(tmp_path):
+    from docclassifier import JournalError
+    path = tmp_path / "j.jsonl"
+    path.write_text('garbage\n{"from": "a", "to": "b"}\n')
+    with pytest.raises(JournalError):
+        RenameJournal(path).entries()
+
+
+def test_journal_failure_rolls_back_rename(tree, monkeypatch):
+    p = pipeline()
+    plan = p.plan(tree)
+    journal = RenameJournal(tree / "j.jsonl")
+    monkeypatch.setattr(RenameJournal, "record", lambda *a: (_ for _ in ()).throw(OSError("disk full")))
+    result = p.apply(plan, journal)
+    assert not result.renamed and len(result.failed) == 3
+    assert (tree / "scan001.docx").exists()  # rolled back
+
+
+def test_cli_refuses_existing_journal_and_missing_dir_is_created(tree):
+    from docclassifier.__main__ import main
+    existing = tree / "old.jsonl"
+    existing.write_text("")
+    assert main(["rename", str(tree), "--apply", "--log", str(existing)]) == 2
+    assert main(["rename", str(tree), "--apply", "--log", str(tree / "new" / "dir" / "j.jsonl")]) == 0

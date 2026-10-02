@@ -162,3 +162,20 @@ This project is licensed under the MIT License. See [LICENSE](LICENSE) for detai
 ## Author
 
 Ly-Bach Truong
+
+## Document Classifier (`docclassifier/`)
+
+Classifies `.docx`, `.xlsx`/`.xlsm` and text files by content, then renames them (including those in subfolders) to a consistent convention such as `2026-10-02_invoice_acme-invoice.docx`.
+
+```bash
+pip install python-docx openpyxl
+python -m docclassifier rename <folder>              # dry run: shows planned renames
+python -m docclassifier rename <folder> --apply      # renames, writes an undo journal
+python -m docclassifier undo rename_log_<timestamp>.jsonl
+python -m docclassifier rename <folder> --template "{category}_{date}_{title}"
+```
+
+- Template fields: `{date}` `{category}` `{title}` `{original}`. Categories and keywords live in `DEFAULT_RULES` (`docclassifier/classifier.py`).
+- Existing files are never overwritten (collisions get `_2`, `_3`, ...), hidden/temp files are skipped, and each rename is journaled immediately so it can be undone even after a crash.
+- Add file types by registering a `TextExtractor` with `ExtractorRegistry`.
+- Run the tests with `python -m pytest tests`.
