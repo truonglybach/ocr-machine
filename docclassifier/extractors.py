@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from pathlib import Path
-from typing import Protocol
+from typing import ClassVar, Iterable, Protocol
 
 from .models import ExtractedContent
 
@@ -14,9 +14,19 @@ class ExtractionError(Exception):
 
 
 class TextExtractor(Protocol):
-    extensions: tuple[str, ...]
+    extensions: ClassVar[tuple[str, ...]]
 
     def extract(self, path: Path) -> ExtractedContent: ...
+
+
+class ContentReader(Protocol):
+    """What the pipeline needs from an extractor collection."""
+
+    def supports(self, path: Path) -> bool: ...
+
+    def extract(self, path: Path) -> ExtractedContent:
+        """Raises ExtractionError if the file is unsupported or unreadable."""
+        ...
 
 
 def _as_date(value: datetime | date | None) -> date | None:
@@ -73,7 +83,8 @@ class PlainTextExtractor:
     extensions = (".txt", ".md", ".csv")
 
     def extract(self, path: Path) -> ExtractedContent:
-        text = path.read_text(encoding="utf-8", errors="replace")[:MAX_CHARS]
+        with path.open(encoding="utf-8", errors="replace") as fh:
+            text = fh.read(MAX_CHARS)
         first = next((ln.strip() for ln in text.splitlines() if ln.strip()), None)
         return ExtractedContent(text, first)
 
@@ -81,12 +92,13 @@ class PlainTextExtractor:
 class ExtractorRegistry:
     """Maps file extensions to extractors; register more to support new types."""
 
-    def __init__(self, extractors: list[TextExtractor] | None = None):
+    def __init__(self, extractors: Iterable[TextExtractor] = ()):
         self._by_ext: dict[str, TextExtractor] = {}
-        for extractor in extractors or []:
+        for extractor in extractors:
             self.register(extractor)
 
     def register(self, extractor: TextExtractor) -> None:
+        """Register for each of its extensions; replaces any extractor already registered for one."""
         for ext in extractor.extensions:
             self._by_ext[ext.lower()] = extractor
 

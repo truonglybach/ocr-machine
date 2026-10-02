@@ -1,10 +1,15 @@
 """Classify documents by content and rename them to a consistent convention."""
-from .classifier import KeywordClassifier, DEFAULT_RULES
-from .extractors import ExtractorRegistry, default_registry
-from .naming import NamingConvention
-from .pipeline import RenamePipeline, RenamePlan, RenameAction
+from .classifier import DEFAULT_RULES, Classifier, KeywordClassifier
+from .extractors import ExtractionError, ExtractorRegistry, TextExtractor, default_registry
+from .journal import JournalError, RenameJournal, UndoResult, default_journal_path
+from .models import Classification, DocumentInfo, ExtractedContent
+from .naming import Namer, NamingConvention, slugify
+from .pipeline import ApplyResult, RenameAction, RenamePipeline, RenamePlan, SkippedFile, SkipReason
 
 __all__ = [
-    "KeywordClassifier", "DEFAULT_RULES", "ExtractorRegistry", "default_registry",
-    "NamingConvention", "RenamePipeline", "RenamePlan", "RenameAction",
+    "ApplyResult", "Classification", "Classifier", "DEFAULT_RULES", "DocumentInfo",
+    "ExtractedContent", "ExtractionError", "ExtractorRegistry", "JournalError",
+    "KeywordClassifier", "Namer", "NamingConvention", "RenameAction", "RenameJournal",
+    "RenamePipeline", "RenamePlan", "SkipReason", "SkippedFile", "TextExtractor",
+    "UndoResult", "default_journal_path", "default_registry", "slugify",
 ]

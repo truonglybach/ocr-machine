@@ -1,3 +1,4 @@
+"""Classify .docx/.xlsx (and text) documents and rename them to a consistent convention."""
 from __future__ import annotations
 
 import argparse
@@ -6,26 +7,27 @@ from pathlib import Path
 
 from .classifier import KeywordClassifier
 from .extractors import default_registry
-from .naming import DEFAULT_TEMPLATE, NamingConvention
-from .pipeline import RenamePipeline, undo
+from .journal import JournalError, RenameJournal, default_journal_path
+from .naming import DEFAULT_TEMPLATE, FIELDS, NamingConvention
+from .pipeline import RenamePipeline
 
 
-def main(argv: list[str] | None = None) -> int:
+def _build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="docclassifier", description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
     run = sub.add_parser("rename", help="classify and rename documents under a folder")
     run.add_argument("folder", type=Path)
     run.add_argument("--template", default=DEFAULT_TEMPLATE,
-                     help="fields: {date} {category} {title} {original} (default: %(default)s)")
+                     help="fields: " + " ".join("{%s}" % f for f in sorted(FIELDS)) + " (default: %(default)s)")
     run.add_argument("--apply", action="store_true", help="actually rename (default is a dry run)")
-    run.add_argument("--log", type=Path, default=Path("rename_log.json"), help="undo log path")
-    un = sub.add_parser("undo", help="reverse a previous rename using its log")
+    run.add_argument("--log", type=Path, default=None,
+                     help="undo journal path (default: rename_log_<timestamp>.jsonl in the current folder)")
+    un = sub.add_parser("undo", help="reverse a previous rename using its journal")
     un.add_argument("log", type=Path)
-    args = ap.parse_args(argv)
+    return ap
 
-    if args.cmd == "undo":
-        print(f"Restored {undo(args.log)} file(s).")
-        return 0
+
+def _rename(args: argparse.Namespace) -> int:
     if not args.folder.is_dir():
         print(f"Not a folder: {args.folder}", file=sys.stderr)
         return 2
@@ -34,12 +36,33 @@ def main(argv: list[str] | None = None) -> int:
     for a in plan.actions:
         print(f"{a.source}  ->  {a.target.name}  [{a.category}]")
     for s in plan.skipped:
-        print(f"SKIP {s.path}: {s.reason}", file=sys.stderr)
-    if args.apply:
-        print(f"Renamed {pipeline.apply(plan, args.log)} file(s). Undo log: {args.log}")
-    else:
+        print(f"SKIP {s.path}: {s.reason.value} {s.detail}".rstrip(), file=sys.stderr)
+    if not args.apply:
         print(f"Dry run: {len(plan.actions)} rename(s) planned. Re-run with --apply to proceed.")
-    return 0
+        return 0
+    journal = RenameJournal(args.log or default_journal_path())
+    result = pipeline.apply(plan, journal)
+    print(f"Renamed {len(result.renamed)} file(s). Undo journal: {journal.path}")
+    for a in result.conflicts:
+        print(f"CONFLICT (target exists, left unchanged): {a.source}", file=sys.stderr)
+    for a, err in result.failed:
+        print(f"FAILED {a.source}: {err}", file=sys.stderr)
+    return 1 if result.failed else 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _build_parser().parse_args(argv)
+    try:
+        if args.cmd == "undo":
+            res = RenameJournal(args.log).undo()
+            print(f"Restored {res.restored} file(s).")
+            for p in res.not_restored:
+                print(f"NOT RESTORED (missing, or original name taken): {p}", file=sys.stderr)
+            return 0
+        return _rename(args)
+    except (ValueError, JournalError, OSError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
